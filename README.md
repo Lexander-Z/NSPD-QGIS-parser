@@ -6,8 +6,9 @@ https://www.gosuslugi.ru/crt
 Инструкция
 
 0. Установка сертификатов Минцифры
-1. Запускаем QGIS и создаём проект
-2. Добавляем WMS слой из НСПД, например Земельные участки из ЕГРН (Кадастр). Легче всего добавить через плагин rosreestr-search-qgis-plugin (скрин ниже)
+1. В корне диска C создаём папку с названием 1
+2. Запускаем QGIS и создаём проект
+3. Добавляем WMS слой из НСПД, например Земельные участки из ЕГРН (Кадастр). Легче всего добавить через плагин rosreestr-search-qgis-plugin (скрин ниже)
    ![image](https://github.com/user-attachments/assets/9c257536-e85c-4dbd-a111-8cfd7b1c0032)
    ![image](https://github.com/user-attachments/assets/4c4ab150-4b0f-4ff8-a9f7-fc83fa933ff6)
 
@@ -23,3 +24,9 @@ https://www.gosuslugi.ru/crt
 
 10. "Выполнить сценарий"
     ![image](https://github.com/user-attachments/assets/fa714ec0-e6c9-48c0-b92f-94ab09f4adf0)
+
+11. Нажимаем на необходимый участок для выгрузки
+    ![image](https://github.com/user-attachments/assets/18bef4c9-e654-4fb0-a092-21684e152f3d)
+    Создастся новый слой в папке C:\1
+    Все новые объекты будут добавлены в слой
+    В случае ошибок сохранения рекомендую удалить слой из папки C:\1
