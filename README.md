@@ -5,15 +5,21 @@ https://www.gosuslugi.ru/crt
 
 Инструкция
 
-3. Запускаем QGIS и создаём проект
+0. Установка сертификатов Минцифры
+1. Запускаем QGIS и создаём проект
+2. Добавляем WMS слой из НСПД, например Земельные участки из ЕГРН (Кадастр). Легче всего добавить через плагин rosreestr-search-qgis-plugin (скрин ниже)
+   ![image](https://github.com/user-attachments/assets/9c257536-e85c-4dbd-a111-8cfd7b1c0032)
+   ![image](https://github.com/user-attachments/assets/4c4ab150-4b0f-4ff8-a9f7-fc83fa933ff6)
+
+
 4. В верхнем меню Модули - Консоль Python
-![image](https://github.com/user-attachments/assets/20c6ecc4-a2c3-463a-956c-088e0f5bac22)
+   ![image](https://github.com/user-attachments/assets/20c6ecc4-a2c3-463a-956c-088e0f5bac22)
 
-5. В открывшемся окне нажимаем кнопку "Редактор"
-![image](https://github.com/user-attachments/assets/47bf1918-d4d8-4dd5-9a1c-7825b241c401)
+6. В открывшемся окне нажимаем кнопку "Редактор"
+   ![image](https://github.com/user-attachments/assets/47bf1918-d4d8-4dd5-9a1c-7825b241c401)
 
-6. "Открыть сценарий" - выбираем нужный скрипт
-![image](https://github.com/user-attachments/assets/b5a48e6c-7d57-43ac-8808-0543208cc044)
+8. "Открыть сценарий" - выбираем нужный скрипт
+   ![image](https://github.com/user-attachments/assets/b5a48e6c-7d57-43ac-8808-0543208cc044)
 
-7. "Выполнить сценарий"
-![image](https://github.com/user-attachments/assets/fa714ec0-e6c9-48c0-b92f-94ab09f4adf0)
+10. "Выполнить сценарий"
+    ![image](https://github.com/user-attachments/assets/fa714ec0-e6c9-48c0-b92f-94ab09f4adf0)
