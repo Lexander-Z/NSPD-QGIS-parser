@@ -61,3 +61,4 @@ https://www.gosuslugi.ru/crt
 
    ## :exclamation: После окончания выгрузки необходимых объектов рекомендуется пересохранить фаил в другое место, а в папке 1 удалить.
    ## :exclamation: В случае, если скрипт сообщил об ошибке сохранения удалить слой из папки C:\1
+   ![image](https://github.com/user-attachments/assets/a0ec7c4e-5b9b-488b-956f-ae9f915320fd)
