@@ -28,5 +28,18 @@ https://www.gosuslugi.ru/crt
 11. Нажимаем на необходимый участок для выгрузки
     ![image](https://github.com/user-attachments/assets/18bef4c9-e654-4fb0-a092-21684e152f3d)
     Создастся новый слой в папке C:\1
-    Все новые объекты будут добавлены в слой
-    В случае ошибок сохранения рекомендую удалить слой из папки C:\1
+    В зависимости от скрипта названия слоёв будут:
+    "C:/1/ZOUIT_OKN.gpkg"
+    "C:/1/ZOUIT_Energetika_svaz_transport.gpkg"
+    "C:/1/ZOUIT_ohranyaemyh_ob_i_bezopasnosti.gpkg"
+    "C:/1/ZOUIT_prirodnyh_territorii.gpkg"
+    "C:/1/Inye_ZOUIT.gpkg"
+    "C:/1/NSPD_Kadastr.gpkg"
+    
+    Все новые объекты будут добавлены в один слой и будет указано количество объектов выгруженных за раз
+    ![image](https://github.com/user-attachments/assets/2a749204-3fc0-478d-b6c2-ffde29b7f126)
+       Атрибутивная таблица также будет заполнена
+    ![image](https://github.com/user-attachments/assets/5eda4a20-ed65-4cb2-8d85-4e08c5e572f6)
+   В случае ошибок сохранения рекомендую удалить слой из папки C:\1
+12.Для завершения работы скрипта необходимо в верхней панели QGIS нажать на "Создать объект", "Выбрать объект" и т.д., чтобы сменился тип курсора на любой другой
+
