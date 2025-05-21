@@ -12,7 +12,6 @@ https://www.gosuslugi.ru/crt
    ![image](https://github.com/user-attachments/assets/9c257536-e85c-4dbd-a111-8cfd7b1c0032)
    ![image](https://github.com/user-attachments/assets/4c4ab150-4b0f-4ff8-a9f7-fc83fa933ff6)
 
-
 4. В верхнем меню Модули - Консоль Python
    ![image](https://github.com/user-attachments/assets/20c6ecc4-a2c3-463a-956c-088e0f5bac22)
 
@@ -35,11 +34,12 @@ https://www.gosuslugi.ru/crt
     "C:/1/ZOUIT_prirodnyh_territorii.gpkg"
     "C:/1/Inye_ZOUIT.gpkg"
     "C:/1/NSPD_Kadastr.gpkg"
-    
+
     Все новые объекты будут добавлены в один слой и будет указано количество объектов выгруженных за раз
     ![image](https://github.com/user-attachments/assets/2a749204-3fc0-478d-b6c2-ffde29b7f126)
-       Атрибутивная таблица также будет заполнена
+    Атрибутивная таблица также будет заполнена
     ![image](https://github.com/user-attachments/assets/5eda4a20-ed65-4cb2-8d85-4e08c5e572f6)
-   В случае ошибок сохранения рекомендую удалить слой из папки C:\1
-12.Для завершения работы скрипта необходимо в верхней панели QGIS нажать на "Создать объект", "Выбрать объект" и т.д., чтобы сменился тип курсора на любой другой
+    В случае ошибок сохранения рекомендую удалить слой из папки C:\
+
+12. Для завершения работы скрипта необходимо в верхней панели QGIS нажать на "Создать объект", "Выбрать объект" и т.д., чтобы сменился тип курсора на любой другой
 
