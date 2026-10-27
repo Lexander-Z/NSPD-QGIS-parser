@@ -14,6 +14,13 @@ from qgis.core import QgsProject, QgsSettings
 from qgis.PyQt.QtWidgets import QFileDialog, QInputDialog
 from qgis.utils import iface
 
+# === Настройки ===
+# Сколько объектов просить у НСПД за один клик. Если придёт ровно столько,
+# в консоли будет предупреждение: выдача могла быть обрезана.
+FEATURE_COUNT = 20
+# Сколько секунд ждать ответа НСПД, прежде чем отменить запрос.
+TIMEOUT_S = 30
+
 SETTINGS_GROUP = "NSPD-QGIS-parser"
 CORE_MODULE = "nspd_core"
 
@@ -80,9 +87,12 @@ def choose_output_path(layer_def):
     last_dir = settings.value(SETTINGS_GROUP + "/lastDir", "")
     if not last_dir or not os.path.isdir(last_dir):
         last_dir = QgsProject.instance().homePath() or os.path.expanduser("~")
+    # Вопрос «заменить файл?» не нужен: существующий файл не заменяется,
+    # объекты дописываются в слой внутри него.
     path, _ = QFileDialog.getSaveFileName(
         iface.mainWindow(), "Куда сохранять объекты НСПД",
-        os.path.join(last_dir, layer_def.file_name), "GeoPackage (*.gpkg)")
+        os.path.join(last_dir, layer_def.file_name), "GeoPackage (*.gpkg)",
+        options=QFileDialog.DontConfirmOverwrite)
     if not path:
         return ""
     if not path.lower().endswith(".gpkg"):
@@ -107,7 +117,10 @@ def main():
         return
 
     canvas = iface.mapCanvas()
-    session = core.NspdSession(output_path, [layer_def])
+    settings = core.RequestSettings()
+    settings.feature_count = FEATURE_COUNT
+    settings.timeout_ms = int(TIMEOUT_S * 1000)
+    session = core.NspdSession(output_path, [layer_def], settings)
     tool = core.NspdIdentifyTool(canvas, session)
     del _active_tools[:]
     _active_tools.append(tool)
