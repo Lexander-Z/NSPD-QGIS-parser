@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+dist/
+# Ссылка или копия общего модуля рядом с плагином при разработке
+plugin/nspd_parser_plugin/nspd_core.py

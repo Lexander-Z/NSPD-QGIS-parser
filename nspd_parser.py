@@ -10,7 +10,7 @@
 import os
 import sys
 
-from qgis.core import QgsProject, QgsSettings
+from qgis.core import QgsApplication, QgsProject, QgsSettings
 from qgis.PyQt.QtWidgets import QFileDialog, QInputDialog
 from qgis.utils import iface
 
@@ -23,6 +23,7 @@ TIMEOUT_S = 30
 
 SETTINGS_GROUP = "NSPD-QGIS-parser"
 CORE_MODULE = "nspd_core"
+PLUGIN_PACKAGE = "nspd_parser_plugin"
 
 # Ссылка на активный инструмент: без неё объект инструмента может быть
 # удалён сборщиком мусора, и клики перестанут обрабатываться.
@@ -37,6 +38,8 @@ def _core_dir_candidates():
     remembered = QgsSettings().value(SETTINGS_GROUP + "/coreDir", "")
     if remembered:
         candidates.append(remembered)
+    # Если установлен плагин, его копия nspd_core тоже подходит.
+    candidates.append(os.path.join(QgsApplication.qgisSettingsDirPath(), "python", "plugins", PLUGIN_PACKAGE))
     candidates.append(os.getcwd())
     return candidates
 
@@ -44,8 +47,9 @@ def _core_dir_candidates():
 def _try_import_from(directory):
     if not directory or not os.path.isfile(os.path.join(directory, CORE_MODULE + ".py")):
         return None
+    # В конец sys.path, чтобы файлы этой папки не заслоняли другие модули.
     if directory not in sys.path:
-        sys.path.insert(0, directory)
+        sys.path.append(directory)
     try:
         return __import__(CORE_MODULE)
     except ImportError:
