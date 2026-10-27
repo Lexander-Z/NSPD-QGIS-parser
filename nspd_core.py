@@ -172,7 +172,15 @@ class Logger:
 
 
 class NspdRequestError(Exception):
-    """Запрос к НСПД не выполнен. Текст исключения готов для показа пользователю."""
+    """Запрос к НСПД не выполнен. Текст исключения готов для показа пользователю.
+
+    connection_failed - ошибка связи (таймаут, TLS, сеть, прокси), а не ответа
+    по конкретному слою: остальные слои в этом клике её тоже получат.
+    """
+
+    def __init__(self, message, connection_failed=False):
+        super().__init__(message)
+        self.connection_failed = connection_failed
 
 
 # === Запрос GetFeatureInfo ===
@@ -258,22 +266,27 @@ def request_feature_info(code, bbox, settings):
     reply.finished.connect(loop.quit)
     timer.timeout.connect(loop.quit)
     timer.start(settings.timeout_ms)
-    exec_event_loop(loop)
+    if not reply.isFinished():
+        exec_event_loop(loop)
     timer.stop()
     try:
         if not reply.isFinished():
             reply.abort()
             raise NspdRequestError(
                 "НСПД не ответил за {0:g} с, запрос отменён. Попробуйте ещё раз "
-                "или увеличьте таймаут.".format(settings.timeout_ms / 1000.0))
-        # В PyQt6 член перечисления всегда истинен, поэтому только явное сравнение.
+                "или увеличьте таймаут.".format(settings.timeout_ms / 1000.0),
+                connection_failed=True)
+        # В Qt6 член перечисления всегда истинен, поэтому только явное сравнение.
         error = reply.error()
         if error != qt_enum(QNetworkReply, "NetworkError", "NoError"):
             message = "запрос к НСПД не выполнен: {0}".format(reply.errorString())
-            if (error == qt_enum(QNetworkReply, "NetworkError", "SslHandshakeFailedError")
-                    or looks_like_ssl_error(reply.errorString())):
+            ssl_failed = (error == qt_enum(QNetworkReply, "NetworkError", "SslHandshakeFailedError")
+                          or looks_like_ssl_error(reply.errorString()))
+            if ssl_failed:
                 message += "\n" + certificate_hint()
-            raise NspdRequestError(message)
+            # Коды QNetworkReply до 200 - ошибки сети и прокси, от 200 - ответа сервера.
+            code = int(getattr(error, "value", error))
+            raise NspdRequestError(message, connection_failed=ssl_failed or code < 200)
         return bytes(reply.readAll()).decode("utf-8", "replace")
     finally:
         reply.deleteLater()
@@ -626,19 +639,24 @@ class NspdSession:
             self.logger.error("точку клика не удалось пересчитать в {0}: {1}".format(WMS_CRS, error))
             return 0
         total = 0
-        for writer in self.writers:
-            total += self._handle_layer(bbox, writer)
+        for index, writer in enumerate(self.writers):
+            try:
+                response = request_feature_info(writer.layer_def.code, bbox, self.settings)
+            except NspdRequestError as error:
+                self.logger.error("«{0}»: {1}".format(writer.layer_def.title, error))
+                # Иначе при недоступном НСПД каждый следующий слой снова ждал бы таймаут.
+                if error.connection_failed and index + 1 < len(self.writers):
+                    self.logger.warn("остальные слои в этом клике не опрашивались: "
+                                     "ошибка связи с НСПД одна для всех слоёв")
+                    break
+                continue
+            total += self._handle_response(response, writer)
         if len(self.writers) > 1:
             self.logger.info("всего добавлено объектов: {0}".format(total))
         return total
 
-    def _handle_layer(self, bbox, writer):
+    def _handle_response(self, response, writer):
         title = writer.layer_def.title
-        try:
-            response = request_feature_info(writer.layer_def.code, bbox, self.settings)
-        except NspdRequestError as error:
-            self.logger.error("«{0}»: {1}".format(title, error))
-            return 0
         try:
             data = json.loads(response)
         except ValueError as error:
