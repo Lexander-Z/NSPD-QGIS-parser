@@ -134,7 +134,7 @@ class NspdParserDock(QDockWidget):
         # объекты дописываются в слои внутри него.
         path, _ = QFileDialog.getSaveFileName(
             self, "Файл GeoPackage для объектов НСПД", current, "GeoPackage (*.gpkg)",
-            options=QFileDialog.DontConfirmOverwrite)
+            options=self.core.qt_enum(QFileDialog, "Option", "DontConfirmOverwrite"))
         if path:
             self.path_edit.setText(path)
             QgsSettings().setValue(SETTINGS_GROUP + "/lastDir", os.path.dirname(path))

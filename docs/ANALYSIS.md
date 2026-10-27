@@ -256,3 +256,39 @@ if layer.commitChanges():
 | 2.11 `commitChanges()` | Если слой уже был в режиме правки у пользователя, объекты добавляются в его правку без сохранения, и в консоль выводится предупреждение. Если правку открыл скрипт, он её и закрывает. При ошибке сохранения выводится `commitErrors()` и правка откатывается. |
 | 2.12 типы геометрии | Объект, тип геометрии которого не совпадает с типом слоя, пропускается с сообщением, в котором названы оба типа. |
 | 2.13 мелочи | Полный ответ сервера в консоль не печатается. Списки сохраняются как JSON. Общий модуль не зависит от глобального `iface`. Эмодзи заменены префиксами `NSPD:`, `NSPD [внимание]:`, `NSPD [ошибка]:`. В плагине есть явная кнопка «Остановить»; в скрипте, как и раньше, работа заканчивается выбором другого инструмента. |
+
+## 5. Изменения ради QGIS 4 (Qt6)
+
+QGIS 4 собирается на Qt6 и PyQt6. Ниже то, что в новом коде (`nspd_core.py`,
+`nspd_parser.py`, `plugin/`) сделано ради работы и в QGIS 3.x, и в QGIS 4,
+и почему. Места, где API различается, собраны в блоке «Совместимость» в
+начале `nspd_core.py`, скрипт и плагин пользуются им же.
+
+| Было | Стало | Почему |
+|---|---|---|
+| `from PyQt5.QtCore import QVariant` (старые скрипты) | Qt импортируется только через `qgis.PyQt.*`, прямого `PyQt5` нет нигде | `qgis.PyQt` — прослойка QGIS: в QGIS 3 она отдаёт PyQt5, в QGIS 4 — PyQt6. Прямой `import PyQt5` в QGIS 4 падает с `ModuleNotFoundError`. |
+| `QgsField(name, QVariant.String)` | `QgsField(name, string_field_type())`: сначала `QMetaType.Type.QString`, откат на `QVariant.String` | В Qt6 перечисления `QVariant.Type` нет. QGIS 3.38+ принимает в `QgsField` тип `QMetaType.Type`, QGIS 4 — только его, QGIS до 3.38 — только `QVariant.Type`. Подходящий вариант выбирается один раз пробным созданием поля. |
+| `loop.exec_()` | `exec_event_loop(loop)`, внутри `loop.exec()` | В PyQt6 метода `exec_()` нет. Запасной `exec_()` берётся, только если `exec()` отсутствует. |
+| `if reply.error():` | `if reply.error() != qt_enum(QNetworkReply, "NetworkError", "NoError")` | В PyQt5 `NoError` равен 0 и ложен. В PyQt6 члены перечислений — объекты `enum`, и `NoError` **истинен**. Старая проверка в QGIS 4 считала бы ошибкой каждый успешный ответ. |
+| `QNetworkReply.SslHandshakeFailedError`, `QgsVectorFileWriter.NoError`, `.CreateOrOverwriteFile`, `.CreateOrOverwriteLayer`, `Qt.RightDockWidgetArea`, `QFileDialog.DontConfirmOverwrite` | `qt_enum(владелец, "Перечисление", "Член")`, например `qt_enum(Qt, "DockWidgetArea", "RightDockWidgetArea")` | В PyQt6 члены перечислений доступны только через класс перечисления (`QFileDialog.Option.DontConfirmOverwrite`). `qt_enum` сначала берёт полную форму, потом короткую. |
+| `QgsVectorFileWriter.writeAsVectorFormatV2` | `write_vector_layer()`: `writeAsVectorFormatV3`, откат на V2 | V2 устарел с QGIS 3.20, V3 есть с 3.20. На наличие V2 в QGIS 4 рассчитывать нельзя, а откат нужен для QGIS 3.16-3.18. |
+| `QgsJsonUtils.stringToFeatureList(text, fields, encoding)` | Сначала вызов с одной строкой, затем с `QgsFields()`, затем с `None` | Третий аргумент в QGIS 3 имел тип `QTextCodec`, которого в Qt6 нет. Вызов без него работает в обоих вариантах API. |
+| `self.toMapCoordinates(event.pos())` | `event.mapPoint()`, запасной путь — прежний | В Qt6 `QMouseEvent.pos()` объявлен устаревшим в пользу `position()`. `QgsMapMouseEvent.mapPoint()` сразу даёт точку в координатах карты и от Qt не зависит. |
+| `reply.readAll().data()` | `bytes(reply.readAll())` | Одинаково работает для `QByteArray` в PyQt5 и PyQt6. |
+| `from qgis.PyQt.QtWidgets import QAction` | `QAction` из `QtGui`, откат на `QtWidgets` | В Qt6 `QAction` переехал из `QtWidgets` в `QtGui`. |
+| `QgsWkbTypes.displayString(layer.wkbType())` | То же, но в `try`. Если вызов не сработал, проверка типа геометрии отключается, а не ломает запись. | Перечисления геометрии в QGIS 3.30+ переехали в `Qgis.WkbType`. Вспомогательный `QgsWkbTypes` пока остаётся, но страховка дешёвая. |
+| В `metadata.txt` нет `qgisMaximumVersion` | `qgisMaximumVersion=4.99`, `supportsQt6=True` | Без явного максимума QGIS берёт пределом `3.99` и считает плагин несовместимым с QGIS 4. `supportsQt6` — признак, который QGIS проверяет для Qt6-сборок. |
+| Глобальный `iface` из консоли | Общий модуль получает `canvas` явно, скрипт берёт `iface` из `qgis.utils` | Не связано с Qt6, но без этого общий модуль нельзя импортировать из плагина. |
+
+Не трогали: адрес API НСПД (`/api/aeggis/v3/`). «Версия 4» относится к
+QGIS, а не к API.
+
+Как это проверено. Синтаксис — `python -m py_compile` по всем новым
+файлам. Отсутствие `PyQt5`, `shapely` и эмодзи — поиском по тексту.
+Ветвления слоя совместимости (`qt_enum`, `exec_event_loop`,
+`string_field_type`, `write_vector_layer`, обработка ответа и ошибок
+запроса) прогнаны на подделках, повторяющих поведение PyQt5 и PyQt6,
+в том числе на истинном `NoError` из PyQt6. В живом QGIS 3 и QGIS 4 код
+не запускался. Таблица составлена по документации API QGIS и списку
+изменений Qt6, поэтому первое, что нужно сделать в QGIS 4, — пройти
+шаги ручной проверки из описания PR.

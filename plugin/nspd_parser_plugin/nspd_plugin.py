@@ -4,7 +4,12 @@ import os
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction
+
+try:
+    # В Qt6 QAction переехал из QtWidgets в QtGui.
+    from qgis.PyQt.QtGui import QAction
+except ImportError:
+    from qgis.PyQt.QtWidgets import QAction
 
 from .core_loader import load_core
 from .nspd_dock import NspdParserDock
@@ -44,7 +49,8 @@ class NspdParserPlugin:
     def _set_dock_visible(self, visible):
         if visible and self.dock is None:
             self.dock = NspdParserDock(self.iface, self.core)
-            self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock)
+            area = self.core.qt_enum(Qt, "DockWidgetArea", "RightDockWidgetArea")
+            self.iface.addDockWidget(area, self.dock)
             self.dock.visibilityChanged.connect(self.action.setChecked)
         if self.dock is not None:
             self.dock.setVisible(visible)

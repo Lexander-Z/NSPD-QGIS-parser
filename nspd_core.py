@@ -3,13 +3,16 @@
 Модуль используют консольный скрипт nspd_parser.py и плагин из plugin/.
 Запрос GetFeatureInfo, разбор GeoJSON и запись в GeoPackage существуют
 в репозитории только здесь: правка логики делается в одном месте.
+
+Код рассчитан на QGIS 3.x (Qt5) и QGIS 4 (Qt6): Qt берётся только через
+qgis.PyQt, а места, где API отличается, собраны в блоке «Совместимость».
 """
 
 import json
 import os
 from collections import namedtuple
 
-from qgis.PyQt.QtCore import QEventLoop, QTimer, QUrl, QVariant
+from qgis.PyQt.QtCore import QEventLoop, QTimer, QUrl
 from qgis.PyQt.QtNetwork import QNetworkReply, QNetworkRequest
 from qgis.gui import QgsMapTool
 from qgis.core import (
@@ -28,6 +31,74 @@ from qgis.core import (
     QgsVectorLayer,
     QgsWkbTypes,
 )
+
+# === Совместимость QGIS 3 (Qt5) и QGIS 4 (Qt6) ===
+
+def qt_enum(owner, enum_name, member_name):
+    """Член перечисления Qt/QGIS.
+
+    В Qt6 (QGIS 4) члены доступны только через класс перечисления
+    (QNetworkReply.NetworkError.NoError), в Qt5 (QGIS 3) - и напрямую
+    (QNetworkReply.NoError). Сначала берётся полная форма.
+    """
+    enum = getattr(owner, enum_name, None)
+    if enum is not None and hasattr(enum, member_name):
+        return getattr(enum, member_name)
+    return getattr(owner, member_name)
+
+
+def exec_event_loop(loop):
+    """В Qt6 есть только exec(); имя с подчёркиванием нужно лишь очень старым сборкам Qt5."""
+    run = getattr(loop, "exec", None) or getattr(loop, "exec_")
+    return run()
+
+
+_string_field_type = []
+
+
+def string_field_type():
+    """Тип строкового поля для QgsField.
+
+    QGIS 4 (Qt6) принимает только QMetaType.Type.QString, QGIS 3.38+ - оба
+    варианта, более старые QGIS 3 - только QVariant.String. Подходящий
+    вариант определяется один раз пробным созданием поля.
+    """
+    if _string_field_type:
+        return _string_field_type[0]
+    candidates = []
+    try:
+        from qgis.PyQt.QtCore import QMetaType
+        candidates.append(QMetaType.Type.QString)
+    except (ImportError, AttributeError):
+        pass
+    try:
+        from qgis.PyQt.QtCore import QVariant
+        candidates.append(QVariant.String)
+    except (ImportError, AttributeError):
+        pass
+    for candidate in candidates:
+        try:
+            QgsField("nspd_probe", candidate)
+        except TypeError:
+            continue
+        _string_field_type.append(candidate)
+        return candidate
+    raise RuntimeError("не удалось подобрать тип строкового поля для QgsField")
+
+
+def write_vector_layer(layer, path, options):
+    """Запись слоя в файл: (код ошибки, текст ошибки).
+
+    writeAsVectorFormatV3 появился в QGIS 3.20 и заменил устаревший V2,
+    на который в QGIS 4 рассчитывать нельзя.
+    """
+    context = QgsProject.instance().transformContext()
+    write = getattr(QgsVectorFileWriter, "writeAsVectorFormatV3", None)
+    if write is None:
+        write = QgsVectorFileWriter.writeAsVectorFormatV2
+    result = write(layer, path, context, options)
+    return result[0], (result[1] if len(result) > 1 else "")
+
 
 # === Таблица слоёв НСПД ===
 # title - название для выбора в интерфейсе, code - код слоя в API НСПД,
@@ -187,7 +258,7 @@ def request_feature_info(code, bbox, settings):
     reply.finished.connect(loop.quit)
     timer.timeout.connect(loop.quit)
     timer.start(settings.timeout_ms)
-    loop.exec_()
+    exec_event_loop(loop)
     timer.stop()
     try:
         if not reply.isFinished():
@@ -195,9 +266,11 @@ def request_feature_info(code, bbox, settings):
             raise NspdRequestError(
                 "НСПД не ответил за {0:g} с, запрос отменён. Попробуйте ещё раз "
                 "или увеличьте таймаут.".format(settings.timeout_ms / 1000.0))
-        if reply.error():
+        # В PyQt6 член перечисления всегда истинен, поэтому только явное сравнение.
+        error = reply.error()
+        if error != qt_enum(QNetworkReply, "NetworkError", "NoError"):
             message = "запрос к НСПД не выполнен: {0}".format(reply.errorString())
-            if (reply.error() == QNetworkReply.SslHandshakeFailedError
+            if (error == qt_enum(QNetworkReply, "NetworkError", "SslHandshakeFailedError")
                     or looks_like_ssl_error(reply.errorString())):
                 message += "\n" + certificate_hint()
             raise NspdRequestError(message)
@@ -350,8 +423,14 @@ def _find_project_layer(path, layer_name):
 
 
 def _layer_geometry_name(layer):
-    """Тип геометрии слоя в терминах GeoJSON (MultiPolygon и т. п.) или None."""
-    return normalise_geometry_type(QgsWkbTypes.displayString(layer.wkbType()))
+    """Тип геометрии слоя в терминах GeoJSON (MultiPolygon и т. п.) или None.
+
+    None отключает проверку типа геометрии при записи, а не запрещает её.
+    """
+    try:
+        return normalise_geometry_type(QgsWkbTypes.displayString(layer.wkbType()))
+    except (AttributeError, TypeError):
+        return None
 
 
 # === Запись в GeoPackage ===
@@ -419,7 +498,7 @@ class LayerWriter:
             self.logger.error("не удалось создать временный слой «{0}»".format(name))
             return None
         memory_layer.dataProvider().addAttributes(
-            [QgsField(field_name, QVariant.String) for field_name in field_names.values()])
+            [QgsField(field_name, string_field_type()) for field_name in field_names.values()])
         memory_layer.updateFields()
 
         options = QgsVectorFileWriter.SaveVectorOptions()
@@ -428,14 +507,11 @@ class LayerWriter:
         options.fileEncoding = "UTF-8"
         # В существующий файл добавляется только наш слой: остальные слои
         # файла (в том числе чужие) не затрагиваются.
-        if os.path.exists(self.output_path):
-            options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
-        else:
-            options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile
-        result = QgsVectorFileWriter.writeAsVectorFormatV2(
-            memory_layer, self.output_path, QgsProject.instance().transformContext(), options)
-        if result[0] != QgsVectorFileWriter.NoError:
-            self.logger.error("не удалось записать слой в {0}: {1}".format(self.output_path, result[1]))
+        action = "CreateOrOverwriteLayer" if os.path.exists(self.output_path) else "CreateOrOverwriteFile"
+        options.actionOnExistingFile = qt_enum(QgsVectorFileWriter, "ActionOnExistingFile", action)
+        error, message = write_vector_layer(memory_layer, self.output_path, options)
+        if error != qt_enum(QgsVectorFileWriter, "WriterError", "NoError"):
+            self.logger.error("не удалось записать слой в {0}: {1}".format(self.output_path, message))
             return None
 
         layer = QgsVectorLayer(self._uri(), name, "ogr")
@@ -461,7 +537,7 @@ class LayerWriter:
                              "Сохраните или отмените правку слоя, и при следующем клике поля "
                              "будут добавлены.".format(name, ", ".join(new_names.values())))
             return
-        fields = [QgsField(field_name, QVariant.String) for field_name in new_names.values()]
+        fields = [QgsField(field_name, string_field_type()) for field_name in new_names.values()]
         if not self.layer.dataProvider().addAttributes(fields):
             self.logger.error("не удалось добавить в слой «{0}» поля: {1}".format(
                 name, ", ".join(new_names.values())))
@@ -590,6 +666,10 @@ class NspdIdentifyTool(QgsMapTool):
         self.session = session
 
     def canvasReleaseEvent(self, event):
-        point = self.toMapCoordinates(event.pos())
+        # mapPoint() сразу даёт координаты карты; QMouseEvent.pos() в Qt6 устарел.
+        if hasattr(event, "mapPoint"):
+            point = event.mapPoint()
+        else:
+            point = self.toMapCoordinates(event.pos())
         self.session.handle_click(self.canvas(), point)
         self.canvas().refreshAllLayers()

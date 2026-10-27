@@ -86,7 +86,7 @@ def choose_layer(core):
     return None
 
 
-def choose_output_path(layer_def):
+def choose_output_path(core, layer_def):
     settings = QgsSettings()
     last_dir = settings.value(SETTINGS_GROUP + "/lastDir", "")
     if not last_dir or not os.path.isdir(last_dir):
@@ -96,7 +96,7 @@ def choose_output_path(layer_def):
     path, _ = QFileDialog.getSaveFileName(
         iface.mainWindow(), "Куда сохранять объекты НСПД",
         os.path.join(last_dir, layer_def.file_name), "GeoPackage (*.gpkg)",
-        options=QFileDialog.DontConfirmOverwrite)
+        options=core.qt_enum(QFileDialog, "Option", "DontConfirmOverwrite"))
     if not path:
         return ""
     if not path.lower().endswith(".gpkg"):
@@ -115,7 +115,7 @@ def main():
     if layer_def is None:
         print("NSPD: слой не выбран, запуск отменён.")
         return
-    output_path = choose_output_path(layer_def)
+    output_path = choose_output_path(core, layer_def)
     if not output_path:
         print("NSPD: файл для сохранения не выбран, запуск отменён.")
         return
