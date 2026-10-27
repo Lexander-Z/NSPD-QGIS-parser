@@ -8,12 +8,16 @@
 qgis.PyQt, а места, где API отличается, собраны в блоке «Совместимость».
 """
 
+import copy
 import json
 import os
 from collections import namedtuple
+from urllib.parse import unquote, urlsplit
 
-from qgis.PyQt.QtCore import QEventLoop, QTimer, QUrl
+from qgis.PyQt.QtCore import QEventLoop, Qt, QTimer, QUrl, pyqtSignal
+from qgis.PyQt.QtGui import QCursor
 from qgis.PyQt.QtNetwork import QNetworkReply, QNetworkRequest
+from qgis.PyQt.QtWidgets import QApplication
 from qgis.gui import QgsMapTool
 from qgis.core import (
     QgsCoordinateReferenceSystem,
@@ -27,6 +31,7 @@ from qgis.core import (
     QgsNetworkAccessManager,
     QgsPointXY,
     QgsProject,
+    QgsRasterLayer,
     QgsVectorFileWriter,
     QgsVectorLayer,
     QgsWkbTypes,
@@ -176,11 +181,13 @@ class NspdRequestError(Exception):
 
     connection_failed - ошибка связи (таймаут, TLS, сеть, прокси), а не ответа
     по конкретному слою: остальные слои в этом клике её тоже получат.
+    ssl_failed - ошибка TLS, чаще всего из-за отсутствия сертификатов Минцифры.
     """
 
-    def __init__(self, message, connection_failed=False):
+    def __init__(self, message, connection_failed=False, ssl_failed=False):
         super().__init__(message)
-        self.connection_failed = connection_failed
+        self.connection_failed = connection_failed or ssl_failed
+        self.ssl_failed = ssl_failed
 
 
 # === Запрос GetFeatureInfo ===
@@ -246,26 +253,31 @@ def looks_like_ssl_error(error_text):
 
 
 def certificate_hint():
-    return ("Похоже, на компьютере нет корневых сертификатов Минцифры, без них "
-            "nspd.gov.ru не открывается. Установите их с {0} и перезагрузите "
-            "компьютер, затем запустите выгрузку снова.").format(CERTIFICATES_URL)
+    return ("Похоже, QGIS не доверяет сертификату nspd.gov.ru: нужны корневые "
+            "сертификаты Минцифры. Установите их с {0} и перезагрузите компьютер. "
+            "Если стоит плагин NSPD Parser, их можно установить только в QGIS: "
+            "кнопка «Сертификаты...» в его панели.").format(CERTIFICATES_URL)
 
 
-def request_feature_info(code, bbox, settings):
-    """Выполняет GetFeatureInfo и возвращает текст ответа.
+def http_get(url, timeout_ms, headers=None, ssl_hint=True):
+    """GET через QgsNetworkAccessManager: с прокси и сертификатами из настроек QGIS.
 
     Интерфейс QGIS на время запроса блокируется, поэтому ожидание ограничено
-    settings.timeout_ms: по истечении запрос отменяется с понятной ошибкой.
+    timeout_ms: по истечении запрос отменяется с понятной ошибкой. Возвращает
+    тело ответа (bytes), при ошибке поднимает NspdRequestError. ssl_hint
+    добавляет к ошибке TLS подсказку про сертификаты Минцифры.
     """
-    request = QNetworkRequest(QUrl(build_request_url(code, bbox, settings)))
-    request.setRawHeader(b"Referer", REFERER.encode("utf-8"))
+    host = urlsplit(url).hostname or url
+    request = QNetworkRequest(QUrl(url))
+    for name, value in (headers or {}).items():
+        request.setRawHeader(name, value)
     reply = QgsNetworkAccessManager.instance().get(request)
     loop = QEventLoop()
     timer = QTimer()
     timer.setSingleShot(True)
     reply.finished.connect(loop.quit)
     timer.timeout.connect(loop.quit)
-    timer.start(settings.timeout_ms)
+    timer.start(timeout_ms)
     if not reply.isFinished():
         exec_event_loop(loop)
     timer.stop()
@@ -273,23 +285,130 @@ def request_feature_info(code, bbox, settings):
         if not reply.isFinished():
             reply.abort()
             raise NspdRequestError(
-                "НСПД не ответил за {0:g} с, запрос отменён. Попробуйте ещё раз "
-                "или увеличьте таймаут.".format(settings.timeout_ms / 1000.0),
+                "нет ответа от {0} за {1:g} с, запрос отменён. Попробуйте ещё раз "
+                "или увеличьте таймаут.".format(host, timeout_ms / 1000.0),
                 connection_failed=True)
         # В Qt6 член перечисления всегда истинен, поэтому только явное сравнение.
         error = reply.error()
         if error != qt_enum(QNetworkReply, "NetworkError", "NoError"):
-            message = "запрос к НСПД не выполнен: {0}".format(reply.errorString())
+            message = "запрос к {0} не выполнен: {1}".format(host, reply.errorString())
             ssl_failed = (error == qt_enum(QNetworkReply, "NetworkError", "SslHandshakeFailedError")
                           or looks_like_ssl_error(reply.errorString()))
-            if ssl_failed:
+            if ssl_failed and ssl_hint:
                 message += "\n" + certificate_hint()
             # Коды QNetworkReply до 200 - ошибки сети и прокси, от 200 - ответа сервера.
             code = int(getattr(error, "value", error))
-            raise NspdRequestError(message, connection_failed=ssl_failed or code < 200)
-        return bytes(reply.readAll()).decode("utf-8", "replace")
+            raise NspdRequestError(message, connection_failed=code < 200, ssl_failed=ssl_failed)
+        return bytes(reply.readAll())
     finally:
         reply.deleteLater()
+
+
+def request_feature_info(code, bbox, settings):
+    """Выполняет GetFeatureInfo и возвращает текст ответа."""
+    url = build_request_url(code, bbox, settings)
+    body = http_get(url, settings.timeout_ms, {b"Referer": REFERER.encode("utf-8")})
+    return body.decode("utf-8", "replace")
+
+
+# Точка для проверки связи: центр Москвы в EPSG:3857. Что под ней лежит,
+# неважно: проверяется только то, что НСПД отвечает на GetFeatureInfo JSON-ом.
+CHECK_POINT_3857 = (4187541.0, 7509137.0)
+
+
+def check_connection(settings, timeout_ms=15000):
+    """Пробный GetFeatureInfo к первому слою таблицы.
+
+    Возвращает None, если НСПД ответил в ожидаемом формате, иначе
+    NspdRequestError с понятным текстом.
+    """
+    probe = copy.copy(settings)
+    probe.feature_count = 1
+    probe.timeout_ms = min(settings.timeout_ms, timeout_ms)
+    x, y = CHECK_POINT_3857
+    try:
+        response = request_feature_info(LAYERS[0].code, (x - 10.0, y - 10.0, x + 10.0, y + 10.0), probe)
+    except NspdRequestError as error:
+        return error
+    try:
+        data = json.loads(response)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        return NspdRequestError("НСПД ответил, но не данными в формате JSON. Начало ответа: "
+                                + response[:200].replace("\n", " "))
+    return None
+
+
+# === WMS-слои НСПД на карте ===
+
+WMS_GROUP_NAME = "НСПД"
+
+
+def wms_layer_uri(layer_def):
+    """Источник WMS-слоя НСПД для провайдера QGIS «wms»."""
+    parts = (
+        ("crs", WMS_CRS),
+        ("dpiMode", "7"),
+        ("format", "image/png"),
+        ("layers", layer_def.code),
+        ("styles", ""),
+        # Referer передаётся так же, как в запросах GetFeatureInfo. Ключ referer
+        # читают старые версии QGIS, http-header:referer - QGIS 3.24 и новее.
+        ("referer", REFERER),
+        ("http-header:referer", REFERER),
+        ("url", wms_url(layer_def.code)),
+    )
+    return "&".join("{0}={1}".format(key, value) for key, value in parts)
+
+
+def find_wms_layer(layer_def):
+    """WMS-слой этого слоя НСПД, уже добавленный в проект (в том числе другим плагином)."""
+    marker = "nspd.gov.ru/api/aeggis/v3/{0}/wms".format(layer_def.code)
+    for layer in QgsProject.instance().mapLayers().values():
+        if layer.providerType() == "wms" and marker in unquote(layer.source()):
+            return layer
+    return None
+
+
+def add_wms_layer(layer_def):
+    """Добавляет WMS-слой НСПД в группу «НСПД» проекта, если его там ещё нет.
+
+    Возвращает (слой или None, добавлен ли он сейчас, текст ошибки). Провайдер
+    WMS при создании слоя запрашивает описание сервиса (GetCapabilities),
+    поэтому вызов блокирует интерфейс на время этого запроса.
+    """
+    existing = find_wms_layer(layer_def)
+    if existing is not None:
+        return existing, False, ""
+    layer = QgsRasterLayer(wms_layer_uri(layer_def), "НСПД: " + layer_def.title, "wms")
+    if not layer.isValid():
+        summary = layer.error().summary() if hasattr(layer, "error") else ""
+        return None, False, summary or "провайдер WMS не смог открыть источник"
+    project = QgsProject.instance()
+    project.addMapLayer(layer, False)
+    _wms_group(project).addLayer(layer)
+    return layer, True, ""
+
+
+def _wms_group(project):
+    """Группа «НСПД» в дереве слоёв: над верхним растровым слоем, под векторными.
+
+    Растры НСПД не должны закрывать выгруженные объекты, а подложка
+    (OpenStreetMap и т. п.) не должна закрывать растры НСПД.
+    """
+    root = project.layerTreeRoot()
+    group = root.findGroup(WMS_GROUP_NAME)
+    if group is not None:
+        return group
+    children = root.children()
+    index = len(children)
+    for position, node in enumerate(children):
+        layer = node.layer() if hasattr(node, "layer") else None
+        if isinstance(layer, QgsRasterLayer):
+            index = position
+            break
+    return root.insertGroup(index, WMS_GROUP_NAME)
 
 
 # === Разбор ответа ===
@@ -459,9 +578,12 @@ class LayerWriter:
         self.layer = None
         self.layer_type = None
         self.field_names = {}
+        # Геометрии объектов, добавленных последним вызовом write (для подсветки).
+        self.last_added = []
 
     def write(self, features):
         """Добавляет объекты ответа в слой и возвращает число добавленных."""
+        self.last_added = []
         rows = [flatten_properties(feature.get("properties")) for feature in features]
         keys = []
         for row in rows:
@@ -616,6 +738,7 @@ class LayerWriter:
                              "текущую правку. Сохраните слой сами.".format(name))
         layer.updateExtents()
         layer.triggerRepaint()
+        self.last_added = [QgsGeometry(feature.geometry()) for feature in new_features]
         return len(new_features)
 
 
@@ -630,9 +753,17 @@ class NspdSession:
         self.logger = logger or Logger()
         self.writers = [LayerWriter(output_path, layer_def, self.settings, self.logger)
                         for layer_def in layer_defs]
+        # Итоги последнего клика и всего сеанса - для панели плагина.
+        self.last_counts = []
+        self.last_errors = []
+        self.total_added = 0
 
     def handle_click(self, canvas, point):
         """Опрашивает все слои сеанса в точке клика, возвращает число добавленных объектов."""
+        self.last_counts = []
+        self.last_errors = []
+        for writer in self.writers:
+            writer.last_added = []
         try:
             bbox = click_bbox(canvas, point, self.settings)
         except QgsCsException as error:
@@ -643,6 +774,7 @@ class NspdSession:
             try:
                 response = request_feature_info(writer.layer_def.code, bbox, self.settings)
             except NspdRequestError as error:
+                self.last_errors.append(error)
                 self.logger.error("«{0}»: {1}".format(writer.layer_def.title, error))
                 # Иначе при недоступном НСПД каждый следующий слой снова ждал бы таймаут.
                 if error.connection_failed and index + 1 < len(self.writers):
@@ -650,9 +782,12 @@ class NspdSession:
                                      "ошибка связи с НСПД одна для всех слоёв")
                     break
                 continue
-            total += self._handle_response(response, writer)
+            added = self._handle_response(response, writer)
+            self.last_counts.append((writer.layer_def, added))
+            total += added
         if len(self.writers) > 1:
             self.logger.info("всего добавлено объектов: {0}".format(total))
+        self.total_added += total
         return total
 
     def _handle_response(self, response, writer):
@@ -677,11 +812,19 @@ class NspdSession:
 
 
 class NspdIdentifyTool(QgsMapTool):
-    """Инструмент карты: клик запрашивает объекты НСПД и дописывает их в GeoPackage."""
+    """Инструмент карты: клик запрашивает объекты НСПД и дописывает их в GeoPackage.
+
+    Пока инструмент активен, курсор - перекрестие; на время запроса - часы.
+    Добавленные объекты на секунду подсвечиваются на карте.
+    """
+
+    # Сигнал после обработки клика: число добавленных объектов.
+    clickProcessed = pyqtSignal(int)
 
     def __init__(self, canvas, session):
         super().__init__(canvas)
         self.session = session
+        self.setCursor(QCursor(qt_enum(Qt, "CursorShape", "CrossCursor")))
 
     def canvasReleaseEvent(self, event):
         # mapPoint() сразу даёт координаты карты; QMouseEvent.pos() в Qt6 устарел.
@@ -689,5 +832,19 @@ class NspdIdentifyTool(QgsMapTool):
             point = event.mapPoint()
         else:
             point = self.toMapCoordinates(event.pos())
-        self.session.handle_click(self.canvas(), point)
+        QApplication.setOverrideCursor(QCursor(qt_enum(Qt, "CursorShape", "WaitCursor")))
+        try:
+            added = self.session.handle_click(self.canvas(), point)
+        finally:
+            QApplication.restoreOverrideCursor()
         self.canvas().refreshAllLayers()
+        self._flash_added()
+        self.clickProcessed.emit(added)
+
+    def _flash_added(self):
+        canvas = self.canvas()
+        if not hasattr(canvas, "flashGeometries"):
+            return
+        for writer in self.session.writers:
+            if writer.last_added and writer.layer is not None:
+                canvas.flashGeometries(writer.last_added, writer.layer.crs())

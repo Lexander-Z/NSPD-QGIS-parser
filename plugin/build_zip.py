@@ -27,9 +27,9 @@ DIST_DIR = os.path.join(REPO_ROOT, "dist")
 SHARED_MODULES = ("nspd_core.py",)
 INCLUDED_EXTENSIONS = (".py", ".txt", ".svg", ".png")
 REQUIRED_FILES = ("__init__.py", "metadata.txt", "nspd_core.py", "core_loader.py",
-                  "nspd_plugin.py", "nspd_dock.py")
+                  "nspd_plugin.py", "nspd_dock.py", "nspd_certificates.py", "nspd_cert_dialog.py")
 REQUIRED_METADATA = ("name", "qgisMinimumVersion", "description", "about", "version",
-                     "author", "repository")
+                     "author", "email", "repository")
 LICENSE_FILE = "LICENSE"
 
 

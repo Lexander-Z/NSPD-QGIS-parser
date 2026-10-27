@@ -7,11 +7,10 @@ qgisMinimumVersion=3.16
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=Выгрузка объектов НСПД (земельные участки ЕГРН, ЗОУИТ) по клику по карте в GeoPackage
-about=По клику по карте плагин отправляет WMS-запрос GetFeatureInfo к НСПД (nspd.gov.ru), разбирает ответ GeoJSON и дописывает объекты с атрибутами в файл GeoPackage. Можно опрашивать несколько слоёв сразу: земельные участки ЕГРН и пять групп ЗОУИТ. Для работы на компьютере должны быть установлены корневые сертификаты Минцифры: https://www.gosuslugi.ru/crt
+about=По клику по карте плагин отправляет WMS-запрос GetFeatureInfo к НСПД (nspd.gov.ru), разбирает ответ GeoJSON и дописывает объекты с атрибутами в файл GeoPackage. Можно опрашивать несколько слоёв сразу: земельные участки ЕГРН и пять групп ЗОУИТ. Плагин умеет добавлять WMS-слои НСПД на карту и по запросу пользователя устанавливает корневые сертификаты Минцифры в хранилище сертификатов QGIS (без изменения системы; файлы скачиваются с официального адреса и сверяются по отпечаткам SHA-256). Официальная страница сертификатов: https://www.gosuslugi.ru/crt
 version=0.1.0
 author=Lexander-Z
-# Адрес обязателен только для публикации в репозитории плагинов QGIS. Перед публикацией его нужно заполнить.
-email=
+email=zallstr@gmail.com
 homepage=https://github.com/Lexander-Z/NSPD-QGIS-parser
 tracker=https://github.com/Lexander-Z/NSPD-QGIS-parser/issues
 repository=https://github.com/Lexander-Z/NSPD-QGIS-parser
