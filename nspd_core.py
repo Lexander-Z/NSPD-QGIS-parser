@@ -1,4 +1,4 @@
-"""Общая логика выгрузки объектов НСПД по клику по карте.
+"""Общая логика выгрузки объектов НСПД по клику по карте и по области.
 
 Модуль используют консольный скрипт nspd_parser.py и плагин из plugin/.
 Запрос GetFeatureInfo, разбор GeoJSON и запись в GeoPackage существуют
@@ -10,9 +10,11 @@ qgis.PyQt, а места, где API отличается, собраны в б�
 
 import copy
 import json
+import math
 import os
 from collections import namedtuple
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
+from xml.etree import ElementTree
 
 from qgis.PyQt.QtCore import QEventLoop, Qt, QTimer, QUrl, pyqtSignal
 from qgis.PyQt.QtGui import QCursor
@@ -32,6 +34,7 @@ from qgis.core import (
     QgsPointXY,
     QgsProject,
     QgsRasterLayer,
+    QgsRectangle,
     QgsVectorFileWriter,
     QgsVectorLayer,
     QgsWkbTypes,
@@ -153,6 +156,10 @@ class RequestSettings:
         # Предел длины имени поля (как в PostgreSQL), чтобы GPKG без
         # сюрпризов загружался в PostGIS.
         self.max_field_name_length = 63
+        # Выгрузка области: пауза между запросами, мс, чтобы не нагружать НСПД,
+        # и предел числа запросов на один слой.
+        self.area_pause_ms = 100
+        self.max_area_requests = 5000
 
 
 def wms_url(code):
@@ -228,8 +235,10 @@ def click_bbox(canvas, point, settings):
             centre.x() + half_span, centre.y() + half_span)
 
 
-def build_request_url(code, bbox, settings):
-    centre_pixel = settings.image_size // 2
+def build_request_url(code, bbox, settings, image_size=None):
+    """Адрес GetFeatureInfo. image_size=1 - запрос «окном»: один пиксель на весь bbox."""
+    size = image_size or settings.image_size
+    centre_pixel = size // 2
     return (
         "{url}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetFeatureInfo"
         "&LAYERS={code}&QUERY_LAYERS={code}&CRS={crs}"
@@ -239,7 +248,7 @@ def build_request_url(code, bbox, settings):
     ).format(
         url=wms_url(code), code=code, crs=WMS_CRS,
         bbox=",".join(repr(value) for value in bbox),
-        size=settings.image_size, pixel=centre_pixel, count=settings.feature_count,
+        size=size, pixel=centre_pixel, count=settings.feature_count,
     )
 
 
@@ -259,6 +268,66 @@ def certificate_hint():
             "кнопка «Сертификаты...» в его панели.").format(CERTIFICATES_URL)
 
 
+# НСПД отвечает 403 на User-Agent, который ставит QGIS, а по HTTP/2 Qt получает
+# от него пустой ответ, и WMS-слой выходит «невалидным». Это выяснили авторы
+# плагина rosreestr-search-qgis-plugin; поэтому к запросам на nspd.gov.ru
+# подставляются браузерный User-Agent и HTTP/1.1.
+NSPD_HOST = "nspd.gov.ru"
+BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0"
+
+
+def is_nspd_host(host):
+    host = (host or "").lower()
+    return host == NSPD_HOST or host.endswith("." + NSPD_HOST)
+
+
+def prepare_nspd_request(request):
+    """Браузерный User-Agent и HTTP/1.1 для запроса к НСПД."""
+    request.setRawHeader(b"User-Agent", BROWSER_USER_AGENT.encode("ascii"))
+    try:
+        request.setAttribute(qt_enum(QNetworkRequest, "Attribute", "Http2AllowedAttribute"), False)
+    except AttributeError:
+        pass
+
+
+def install_nspd_request_hook():
+    """Обработчик всех запросов QGIS к НСПД, в том числе WMS-слоёв на карте.
+
+    Возвращает идентификатор для remove_nspd_request_hook или None, если
+    QGIS такие обработчики не поддерживает (появились в QGIS 3.22).
+    """
+    register = getattr(QgsNetworkAccessManager, "setRequestPreprocessor", None)
+    if register is None:
+        return None
+
+    def preprocess(request):
+        url = request.url()
+        if url.scheme().lower() == "https" and is_nspd_host(url.host()):
+            prepare_nspd_request(request)
+        # Обёртка QGIS ожидает от обработчика строку.
+        return ""
+
+    return register(preprocess)
+
+
+def remove_nspd_request_hook(hook_id):
+    if not hook_id:
+        return
+    try:
+        QgsNetworkAccessManager.removeRequestPreprocessor(hook_id)
+    except (AttributeError, KeyError):
+        pass
+
+
+def pause(milliseconds):
+    """Пауза без остановки интерфейса QGIS."""
+    if milliseconds <= 0:
+        return
+    loop = QEventLoop()
+    QTimer.singleShot(int(milliseconds), loop.quit)
+    exec_event_loop(loop)
+
+
 def http_get(url, timeout_ms, headers=None, ssl_hint=True):
     """GET через QgsNetworkAccessManager: с прокси и сертификатами из настроек QGIS.
 
@@ -269,6 +338,8 @@ def http_get(url, timeout_ms, headers=None, ssl_hint=True):
     """
     host = urlsplit(url).hostname or url
     request = QNetworkRequest(QUrl(url))
+    if is_nspd_host(host):
+        prepare_nspd_request(request)
     for name, value in (headers or {}).items():
         request.setRawHeader(name, value)
     reply = QgsNetworkAccessManager.instance().get(request)
@@ -304,9 +375,9 @@ def http_get(url, timeout_ms, headers=None, ssl_hint=True):
         reply.deleteLater()
 
 
-def request_feature_info(code, bbox, settings):
+def request_feature_info(code, bbox, settings, image_size=None):
     """Выполняет GetFeatureInfo и возвращает текст ответа."""
-    url = build_request_url(code, bbox, settings)
+    url = build_request_url(code, bbox, settings, image_size)
     body = http_get(url, settings.timeout_ms, {b"Referer": REFERER.encode("utf-8")})
     return body.decode("utf-8", "replace")
 
@@ -345,21 +416,61 @@ def check_connection(settings, timeout_ms=15000):
 WMS_GROUP_NAME = "НСПД"
 
 
-def wms_layer_uri(layer_def):
+def map_referer(code):
+    """Referer, как у карты НСПД с включённым слоем, в виде для источника WMS.
+
+    Карта НСПД передаёт включённые слои параметром active_layers: символом,
+    код которого равен коду слоя (37577 - символ U+92C9). Знак «=» записан как
+    %3D, чтобы QGIS не принял его за разделитель параметров источника.
+    """
+    return "{0}?active_layers%3D{1}".format(REFERER, quote(chr(int(code)), safe=""))
+
+
+def wms_layer_uri(layer_def, layer_names=None):
     """Источник WMS-слоя НСПД для провайдера QGIS «wms»."""
-    parts = (
+    referer = map_referer(layer_def.code)
+    parts = [
+        ("contextualWMSLegend", "0"),
         ("crs", WMS_CRS),
         ("dpiMode", "7"),
         ("format", "image/png"),
-        ("layers", layer_def.code),
-        ("styles", ""),
-        # Referer передаётся так же, как в запросах GetFeatureInfo. Ключ referer
-        # читают старые версии QGIS, http-header:referer - QGIS 3.24 и новее.
-        ("referer", REFERER),
-        ("http-header:referer", REFERER),
-        ("url", wms_url(layer_def.code)),
-    )
+        # Ключ referer читают старые версии QGIS, http-header:referer - QGIS 3.24 и новее.
+        ("http-header:referer", referer),
+        ("referer", referer),
+    ]
+    for name in layer_names or [layer_def.code]:
+        parts.extend((("layers", name), ("styles", "")))
+    # Адрес GetMap из описания сервиса НСПД не используется, только базовый.
+    parts.extend((("IgnoreGetMapUrl", "1"), ("url", wms_url(layer_def.code))))
     return "&".join("{0}={1}".format(key, value) for key, value in parts)
+
+
+def parse_wms_capabilities(body):
+    """(имена слоёв, системы координат) из ответа GetCapabilities.
+
+    ValueError, если ответ - не описание WMS-сервиса.
+    """
+    try:
+        root = ElementTree.fromstring(body)
+    except ElementTree.ParseError as error:
+        raise ValueError("ответ не разобран как XML ({0}). Начало ответа: {1}".format(
+            error, bytes(body[:200]).decode("utf-8", "replace")))
+
+    def local(tag):
+        return tag.rsplit("}", 1)[-1]
+
+    if local(root.tag) not in ("WMS_Capabilities", "WMT_MS_Capabilities"):
+        raise ValueError("в ответе {0} вместо описания WMS-сервиса".format(local(root.tag)))
+    names, systems = [], set()
+    for element in root.iter():
+        tag = local(element.tag)
+        if tag == "Layer":
+            for child in element:
+                if local(child.tag) == "Name" and (child.text or "").strip():
+                    names.append(child.text.strip())
+        elif tag in ("CRS", "SRS") and element.text:
+            systems.update(element.text.split())
+    return names, sorted(systems)
 
 
 def find_wms_layer(layer_def):
@@ -382,13 +493,56 @@ def add_wms_layer(layer_def):
     if existing is not None:
         return existing, False, ""
     layer = QgsRasterLayer(wms_layer_uri(layer_def), "НСПД: " + layer_def.title, "wms")
-    if not layer.isValid():
-        summary = layer.error().summary() if hasattr(layer, "error") else ""
-        return None, False, summary or "провайдер WMS не смог открыть источник"
+    if layer.isValid():
+        return _place_wms_layer(layer), True, ""
+    first_error = _layer_error(layer)
+
+    # QGIS не открыл слой. Читаем описание сервиса сами: в журнал попадёт,
+    # что именно ответил НСПД, а если слой в описании назван иначе, чем код,
+    # пробуем ещё раз с настоящими именами.
+    try:
+        body = http_get(wms_url(layer_def.code) + "?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.0",
+                        WMS_CHECK_TIMEOUT_MS, {b"Referer": REFERER.encode("utf-8")})
+        names, systems = parse_wms_capabilities(body)
+    except NspdRequestError as error:
+        return None, False, "{0}. Описание сервиса (GetCapabilities) не получено: {1}".format(first_error, error)
+    except ValueError as error:
+        return None, False, "{0}. НСПД ответил на GetCapabilities не описанием сервиса: {1}".format(
+            first_error, error)
+    if names and layer_def.code not in names:
+        layer = QgsRasterLayer(wms_layer_uri(layer_def, names), "НСПД: " + layer_def.title, "wms")
+        if layer.isValid():
+            return _place_wms_layer(layer), True, ""
+    return None, False, (
+        "{0}. Слои в описании сервиса: {1}; системы координат: {2}. Подробности: журнал "
+        "сообщений QGIS, вкладка WMS").format(
+            first_error, ", ".join(names[:20]) or "нет", ", ".join(systems[:10]) or "нет")
+
+
+WMS_CHECK_TIMEOUT_MS = 15000
+
+
+def _layer_error(layer):
+    texts = []
+    sources = [layer]
+    provider = layer.dataProvider() if hasattr(layer, "dataProvider") else None
+    if provider is not None:
+        sources.append(provider)
+    for source in sources:
+        try:
+            summary = source.error().summary()
+        except AttributeError:
+            continue
+        if summary and summary not in texts:
+            texts.append(summary)
+    return "; ".join(texts) or "провайдер WMS не смог открыть источник"
+
+
+def _place_wms_layer(layer):
     project = QgsProject.instance()
     project.addMapLayer(layer, False)
     _wms_group(project).addLayer(layer)
-    return layer, True, ""
+    return layer
 
 
 def _wms_group(project):
@@ -467,6 +621,11 @@ def geometry_from_geojson(geometry_json):
         return None
     geometry = QgsGeometry.fromWkt(wkt)
     return None if geometry.isNull() else geometry
+
+
+def _feature_in_area(feature, area):
+    geometry = geometry_from_geojson(feature.get("geometry"))
+    return geometry is not None and area.intersects(geometry)
 
 
 def _geometry_via_qgis(geometry_json):
@@ -742,6 +901,127 @@ class LayerWriter:
         return len(new_features)
 
 
+# === Выгрузка области ===
+
+# Самая маленькая ячейка, которую ещё делим на четыре, м; размер «точечного»
+# окна для проверки, что сервер отдаёт объекты окном, м.
+MIN_AREA_CELL_M = 5.0
+PROBE_CELL_M = 1.0
+
+AreaResult = namedtuple("AreaResult", "features requests capped_cells confirmed stopped")
+
+
+def split_rect(rect):
+    xmin, ymin, xmax, ymax = rect
+    xmid, ymid = (xmin + xmax) / 2.0, (ymin + ymax) / 2.0
+    return [(xmin, ymin, xmid, ymid), (xmid, ymin, xmax, ymid),
+            (xmin, ymid, xmid, ymax), (xmid, ymid, xmax, ymax)]
+
+
+def _centre_cell(rect, size):
+    x, y = (rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0
+    return (x - size / 2.0, y - size / 2.0, x + size / 2.0, y + size / 2.0)
+
+
+def feature_key(feature):
+    """Ключ объекта для отсечения повторов: id из ответа, иначе атрибуты целиком."""
+    identifier = feature.get("id")
+    if identifier not in (None, ""):
+        return "id:{0}".format(identifier)
+    return "p:" + json.dumps(feature.get("properties"), sort_keys=True, ensure_ascii=False, default=str)
+
+
+def collect_area(request, rect, feature_count, intersects_area=None, should_stop=None,
+                 on_request=None, max_requests=5000):
+    """Все объекты слоя в прямоугольнике rect (EPSG:3857) запросами «окном».
+
+    request(cell) возвращает объекты GetFeatureInfo картинкой в один пиксель
+    на всю ячейку: WMS-серверы обычно отдают так всё, что пересекает ячейку.
+    Если объектов пришло столько же, сколько feature_count (выдача могла быть
+    обрезана), ячейка делится на четыре. Ячейки вне области
+    (intersects_area(cell) == False) не запрашиваются.
+
+    Сервер мог бы отдавать и только объекты в центре ячейки. Поэтому для
+    ячеек с объектами делается запрос крошечным окном в их центре, пока
+    ячейка не даст больше объектов, чем её центр: так подтверждается, что
+    сервер работает окном (confirmed=True). При работе «точкой» подтверждения
+    не будет никогда.
+    """
+    found = {}
+    requests = 0
+    capped = 0
+    confirmed = False
+    stopped = ""
+    stack = [rect]
+    while stack:
+        if should_stop is not None and should_stop():
+            stopped = "отменено"
+            break
+        cell = stack.pop()
+        if intersects_area is not None and not intersects_area(cell):
+            continue
+        if requests >= max_requests:
+            stopped = "достигнут предел в {0} запросов".format(max_requests)
+            break
+        features = request(cell)
+        requests += 1
+        if len(features) >= feature_count:
+            if min(cell[2] - cell[0], cell[3] - cell[1]) / 2.0 >= MIN_AREA_CELL_M:
+                stack.extend(split_rect(cell))
+                if on_request is not None:
+                    on_request(requests, len(found))
+                continue
+            capped += 1
+        keys = {feature_key(feature) for feature in features}
+        if keys and not confirmed:
+            probe = {feature_key(feature) for feature in request(_centre_cell(cell, PROBE_CELL_M))}
+            requests += 1
+            confirmed = bool(keys - probe)
+        for feature in features:
+            found.setdefault(feature_key(feature), feature)
+        if on_request is not None:
+            on_request(requests, len(found))
+    return AreaResult(list(found.values()), requests, capped, confirmed, stopped)
+
+
+def _to_wms_crs(geometry, crs):
+    result = QgsGeometry(geometry)
+    result.transform(QgsCoordinateTransform(crs, QgsCoordinateReferenceSystem(WMS_CRS), QgsProject.instance()))
+    return result
+
+
+def area_from_rectangle(rect, crs):
+    """Область (QgsGeometry в EPSG:3857) из прямоугольника QgsRectangle в CRS crs."""
+    return _to_wms_crs(QgsGeometry.fromRect(rect), crs)
+
+
+def area_from_selection(layer):
+    """Область из выделенных полигонов слоя; None, если полигонов не выделено."""
+    geometries = [feature.geometry() for feature in layer.selectedFeatures() if feature.hasGeometry()]
+    if not geometries:
+        return None
+    geometry = QgsGeometry.unaryUnion(geometries)
+    if geometry is None or geometry.isNull() or geometry.area() <= 0:
+        return None
+    return _to_wms_crs(geometry, layer.crs())
+
+
+def area_km2(area):
+    """Примерная площадь области в км²: поправка проекции Меркатора по широте центра."""
+    centre_y = area.centroid().asPoint().y()
+    latitude = math.atan(math.sinh(centre_y / 6378137.0))
+    return area.area() * math.cos(latitude) ** 2 / 1e6
+
+
+def flash_added(canvas, session):
+    """На секунду подсвечивает объекты, добавленные последним действием сеанса."""
+    if not hasattr(canvas, "flashGeometries"):
+        return
+    for writer in session.writers:
+        if writer.last_added and writer.layer is not None:
+            canvas.flashGeometries(writer.last_added, writer.layer.crs())
+
+
 # === Сеанс выгрузки и инструмент карты ===
 
 class NspdSession:
@@ -789,6 +1069,72 @@ class NspdSession:
             self.logger.info("всего добавлено объектов: {0}".format(total))
         self.total_added += total
         return total
+
+    def export_area(self, area, should_stop=None, on_progress=None):
+        """Выгружает все объекты слоёв сеанса в области area (QgsGeometry в EPSG:3857).
+
+        on_progress(название слоя, запросов, найдено объектов) вызывается после
+        каждого запроса. Возвращает число добавленных объектов.
+        """
+        self.last_counts = []
+        self.last_errors = []
+        for writer in self.writers:
+            writer.last_added = []
+        box = area.boundingBox()
+        rect = (box.xMinimum(), box.yMinimum(), box.xMaximum(), box.yMaximum())
+
+        def intersects(cell):
+            return area.intersects(QgsGeometry.fromRect(QgsRectangle(*cell)))
+
+        total = 0
+        for writer in self.writers:
+            title = writer.layer_def.title
+            progress = None if on_progress is None else (
+                lambda done, found, title=title: on_progress(title, done, found))
+            try:
+                result = collect_area(self._area_request(writer.layer_def.code), rect,
+                                      self.settings.feature_count, intersects, should_stop,
+                                      progress, self.settings.max_area_requests)
+            except NspdRequestError as error:
+                self.last_errors.append(error)
+                self.logger.error("«{0}»: {1}".format(title, error))
+                if error.connection_failed:
+                    break
+                continue
+            if result.stopped:
+                self.logger.warn("«{0}»: выгрузка области остановлена ({1}), найденное не "
+                                 "записано".format(title, result.stopped))
+                break
+            inside = [feature for feature in result.features if _feature_in_area(feature, area)]
+            self.logger.info("«{0}»: запросов {1}, объектов в области {2}".format(
+                title, result.requests, len(inside)))
+            if result.capped_cells:
+                self.logger.warn("«{0}»: в {1} местах объекты лежат так плотно, что даже в ячейке "
+                                 "{2:g} м их не меньше {3}. Часть могла не выгрузиться: увеличьте "
+                                 "«Объектов за клик».".format(title, result.capped_cells,
+                                                              MIN_AREA_CELL_M, self.settings.feature_count))
+            if inside and not result.confirmed:
+                self.logger.warn("«{0}»: не удалось подтвердить, что НСПД отдаёт все объекты "
+                                 "ячейки, а не только объекты в её центре. Выгрузка может быть "
+                                 "неполной: сверьте с картой.".format(title))
+            added = writer.write(inside) if inside else 0
+            self.last_counts.append((writer.layer_def, added))
+            total += added
+            self.logger.info("«{0}»: добавлено объектов {1}".format(title, added))
+        self.total_added += total
+        return total
+
+    def _area_request(self, code):
+        def request(cell):
+            pause(self.settings.area_pause_ms)
+            text = request_feature_info(code, cell, self.settings, image_size=1)
+            try:
+                data = json.loads(text)
+            except ValueError:
+                raise NspdRequestError("ответ НСПД не разобран как JSON. Начало ответа: "
+                                       + text[:200].replace("\n", " "))
+            return (data.get("features") if isinstance(data, dict) else None) or []
+        return request
 
     def _handle_response(self, response, writer):
         title = writer.layer_def.title
@@ -838,13 +1184,5 @@ class NspdIdentifyTool(QgsMapTool):
         finally:
             QApplication.restoreOverrideCursor()
         self.canvas().refreshAllLayers()
-        self._flash_added()
+        flash_added(self.canvas(), self.session)
         self.clickProcessed.emit(added)
-
-    def _flash_added(self):
-        canvas = self.canvas()
-        if not hasattr(canvas, "flashGeometries"):
-            return
-        for writer in self.session.writers:
-            if writer.last_added and writer.layer is not None:
-                canvas.flashGeometries(writer.last_added, writer.layer.crs())
