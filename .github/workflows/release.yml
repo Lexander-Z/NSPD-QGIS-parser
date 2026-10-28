@@ -53,8 +53,13 @@ jobs:
 
       - name: Публикация релиза
         if: steps.version.outputs.exists == 'false'
-        run: >
-          gh release create "${{ steps.version.outputs.tag }}" dist/nspd_parser_plugin.zip
-          --target "${GITHUB_SHA}"
-          --title "NSPD Parser ${{ steps.version.outputs.tag }}"
-          --notes-file .github/release-notes.md
+        run: |
+          changelog=$(sed -n 's/^changelog=//p' plugin/nspd_parser_plugin/metadata.txt | tr -d '\r')
+          {
+            if [ -n "${changelog}" ]; then printf 'Что нового: %s\n\n' "${changelog}"; fi
+            cat .github/release-notes.md
+          } > release-notes.md
+          gh release create "${{ steps.version.outputs.tag }}" dist/nspd_parser_plugin.zip \
+            --target "${GITHUB_SHA}" \
+            --title "NSPD Parser ${{ steps.version.outputs.tag }}" \
+            --notes-file release-notes.md
