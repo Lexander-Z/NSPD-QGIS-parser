@@ -1,36 +1,60 @@
-# Релиз плагина: на тег vX.Y.Z собирает dist/nspd_parser_plugin.zip
-# (plugin/build_zip.py сам проверяет архив) и публикует его в Releases.
+# Релиз плагина. Когда в main меняется плагин, а для версии из metadata.txt
+# релиза ещё нет, собирает dist/nspd_parser_plugin.zip (plugin/build_zip.py
+# сам проверяет архив) и публикует релиз vX.Y.Z с этим архивом.
+# Новый релиз: поднять version в plugin/nspd_parser_plugin/metadata.txt.
+# Вручную: Actions - Релиз плагина - Run workflow.
 name: Релиз плагина
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+    paths:
+      - "nspd_core.py"
+      - "plugin/**"
+      - ".github/workflows/release.yml"
+      - ".github/release-notes.md"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Тег совпадает с версией в metadata.txt
+      - name: Версия и наличие релиза
+        id: version
         run: |
           version=$(sed -n 's/^version=//p' plugin/nspd_parser_plugin/metadata.txt | tr -d '\r')
-          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
-            echo "Тег ${GITHUB_REF_NAME}, а в metadata.txt version=${version}"
+          if ! echo "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "В metadata.txt неверная версия: '${version}'"
             exit 1
+          fi
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+          if gh release view "v${version}" > /dev/null 2>&1; then
+            echo "Релиз v${version} уже есть. Для нового поднимите version в metadata.txt."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Сборка и проверка архива
+        if: steps.version.outputs.exists == 'false'
         run: python3 plugin/build_zip.py
 
       - name: Публикация релиза
-        env:
-          GH_TOKEN: ${{ github.token }}
+        if: steps.version.outputs.exists == 'false'
         run: >
-          gh release create "${GITHUB_REF_NAME}" dist/nspd_parser_plugin.zip
-          --title "NSPD Parser ${GITHUB_REF_NAME}"
+          gh release create "${{ steps.version.outputs.tag }}" dist/nspd_parser_plugin.zip
+          --target "${GITHUB_SHA}"
+          --title "NSPD Parser ${{ steps.version.outputs.tag }}"
           --notes-file .github/release-notes.md

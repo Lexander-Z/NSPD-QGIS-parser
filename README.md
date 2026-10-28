@@ -69,7 +69,7 @@
 
 - `nspd_core.py`: общая логика скрипта и плагина.
 - `plugin/`: плагин. `python plugin/build_zip.py` собирает и проверяет `dist/nspd_parser_plugin.zip`.
-- Релиз: поднимите `version` в `plugin/nspd_parser_plugin/metadata.txt` и отправьте тег `vX.Y.Z` с той же версией. GitHub Actions соберёт архив и опубликует релиз.
+- Релиз: поднимите `version` в `plugin/nspd_parser_plugin/metadata.txt` и отправьте изменение в `main`. GitHub Actions соберёт архив и опубликует релиз `vX.Y.Z`, если его ещё нет.
 - Работа без установки: подключите `plugin/nspd_parser_plugin` ссылкой в каталог плагинов профиля QGIS.
 - Разбор старого кода и принятые решения: [docs/ANALYSIS.md](docs/ANALYSIS.md).
 
