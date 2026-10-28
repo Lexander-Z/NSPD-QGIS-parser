@@ -1,0 +1,36 @@
+# Релиз плагина: на тег vX.Y.Z собирает dist/nspd_parser_plugin.zip
+# (plugin/build_zip.py сам проверяет архив) и публикует его в Releases.
+name: Релиз плагина
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Тег совпадает с версией в metadata.txt
+        run: |
+          version=$(sed -n 's/^version=//p' plugin/nspd_parser_plugin/metadata.txt | tr -d '\r')
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Тег ${GITHUB_REF_NAME}, а в metadata.txt version=${version}"
+            exit 1
+          fi
+
+      - name: Сборка и проверка архива
+        run: python3 plugin/build_zip.py
+
+      - name: Публикация релиза
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${GITHUB_REF_NAME}" dist/nspd_parser_plugin.zip
+          --title "NSPD Parser ${GITHUB_REF_NAME}"
+          --notes-file .github/release-notes.md
