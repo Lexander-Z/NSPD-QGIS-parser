@@ -24,8 +24,12 @@ class NspdParserPlugin:
         self.core = load_core()
         self.action = None
         self.dock = None
+        self.request_hook = None
 
     def initGui(self):
+        # Браузерный User-Agent и HTTP/1.1 для всех запросов QGIS к НСПД:
+        # без этого НСПД не отдаёт WMS-слои (см. nspd_core.install_nspd_request_hook).
+        self.request_hook = self.core.install_nspd_request_hook()
         icon = QIcon(os.path.join(os.path.dirname(__file__), "icon.svg"))
         self.action = QAction(icon, "Выгрузка объектов НСПД", self.iface.mainWindow())
         self.action.setCheckable(True)
@@ -35,6 +39,8 @@ class NspdParserPlugin:
         self.iface.addPluginToWebMenu(MENU_NAME, self.action)
 
     def unload(self):
+        self.core.remove_nspd_request_hook(self.request_hook)
+        self.request_hook = None
         if self.dock is not None:
             self.dock.stop()
             self.iface.removeDockWidget(self.dock)

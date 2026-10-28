@@ -1,15 +1,15 @@
 """Док-панель плагина.
 
 Сверху вниз: связь с НСПД (сертификаты Минцифры, проверка), выбор слоёв и
-показ их на карте, файл для сохранения, дополнительные настройки, запуск и
-остановка, строка состояния и журнал.
+показ их на карте, файл для сохранения, дополнительные настройки, выгрузка
+по клику и выгрузка области, строка состояния и журнал.
 """
 
 import os
 
-from qgis.core import QgsMessageLog, QgsProject, QgsSettings
-from qgis.gui import QgsCollapsibleGroupBox
-from qgis.PyQt.QtCore import Qt
+from qgis.core import QgsMessageLog, QgsProject, QgsSettings, QgsVectorLayer
+from qgis.gui import QgsCollapsibleGroupBox, QgsMapToolExtent
+from qgis.PyQt.QtCore import QDir, Qt
 from qgis.PyQt.QtGui import QCursor
 from qgis.PyQt.QtWidgets import (
     QApplication,
@@ -23,6 +23,7 @@ from qgis.PyQt.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
+    QProgressDialog,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -35,6 +36,9 @@ from .nspd_cert_dialog import CertificatesDialog
 SETTINGS_GROUP = "NSPD-QGIS-parser"
 DEFAULT_FILE_NAME = "NSPD.gpkg"
 LOG_TAG = "НСПД"
+
+# Области больше этой площади, км², выгружаются только после подтверждения.
+LARGE_AREA_KM2 = 1.0
 
 STATUS_COLORS = {"ok": "#2e7d32", "warning": "#b35900", "error": "#c62828", "info": ""}
 
@@ -64,6 +68,7 @@ class NspdParserDock(QDockWidget):
         self.iface = iface
         self.core = core
         self.tool = None
+        self.area_tool = None
         self.session = None
         self._build_ui()
         self._load_settings()
@@ -156,6 +161,20 @@ class NspdParserDock(QDockWidget):
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.stop_button)
         layout.addLayout(buttons)
+
+        area = QGroupBox("Выгрузить всё в области", widget)
+        area_layout = QHBoxLayout(area)
+        draw_button = QPushButton("Нарисовать прямоугольник", area)
+        draw_button.setToolTip("Нарисуйте на карте прямоугольник: выгрузятся все объекты отмеченных слоёв в нём")
+        draw_button.clicked.connect(self._draw_area)
+        selection_button = QPushButton("По выделенным полигонам", area)
+        selection_button.setToolTip(
+            "Выделите полигоны в активном слое (например, границу населённого пункта): "
+            "выгрузятся все объекты отмеченных слоёв, которые их пересекают")
+        selection_button.clicked.connect(self._export_selection)
+        area_layout.addWidget(draw_button)
+        area_layout.addWidget(selection_button)
+        layout.addWidget(area)
 
         self.status_label = QLabel(widget)
         self.status_label.setWordWrap(True)
@@ -308,7 +327,8 @@ class NspdParserDock(QDockWidget):
         folder = QgsSettings().value(SETTINGS_GROUP + "/lastDir", "")
         if not folder or not os.path.isdir(folder):
             folder = QgsProject.instance().homePath() or os.path.expanduser("~")
-        return os.path.join(folder, DEFAULT_FILE_NAME)
+        # cleanPath приводит разделители к «/»: иначе путь выходит смешанным.
+        return QDir.cleanPath(os.path.join(folder, DEFAULT_FILE_NAME))
 
     def _load_settings(self):
         settings = QgsSettings()
@@ -362,40 +382,51 @@ class NspdParserDock(QDockWidget):
 
     # === Запуск и остановка ===
 
-    def start(self, _checked=False):
+    def _prepare_session(self):
+        """Проверки перед выгрузкой и новый сеанс; None, если начинать нельзя.
+
+        Причина отказа пишется в строку состояния.
+        """
         layer_defs = self._selected_layers()
         if not layer_defs:
             self._set_status("Отметьте хотя бы один слой НСПД.", "warning")
-            return
+            return None
         path = self._output_path()
         if not path:
-            return
+            return None
         if certificates.root_trusted() is False and not self._confirm_without_certificates():
-            return
+            return None
         self._save_settings()
-        # Одна короткая проверка до включения инструмента: иначе при недоступном
-        # НСПД каждый клик ждал бы таймаут и заканчивался ошибкой.
+        # Одна короткая проверка до начала: иначе при недоступном НСПД каждый
+        # запрос ждал бы таймаут и заканчивался ошибкой.
         error = self._run_connection_check()
         if error is not None:
             self._set_status("Выгрузка не начата, нет связи с НСПД: {0}".format(error), "error")
-            return
+            return None
         if self.show_on_map_check.isChecked():
             self._add_layers_to_map(layer_defs=layer_defs, connection_checked=True)
+        self._log("NSPD: слои: {0}. Файл: {1}".format(
+            ", ".join(layer_def.title for layer_def in layer_defs), path))
+        return self.core.NspdSession(path, layer_defs, self._request_settings(), self.core.Logger(self._log))
 
-        session = self.core.NspdSession(path, layer_defs, self._request_settings(), self.core.Logger(self._log))
+    def start(self, _checked=False):
+        self._cancel_area_tool()
+        session = self._prepare_session()
+        if session is None:
+            return
         canvas = self.iface.mapCanvas()
         tool = self.core.NspdIdentifyTool(canvas, session)
         tool.deactivated.connect(lambda tool=tool: self._on_tool_deactivated(tool))
         tool.clickProcessed.connect(self._on_click_processed)
         self.tool, self.session = tool, session
         canvas.setMapTool(tool)
-        self._log("NSPD: выгрузка начата. Слои: {0}. Файл: {1}".format(
-            ", ".join(layer_def.title for layer_def in layer_defs), path))
+        self._log("NSPD: выгрузка по клику начата.")
         self._set_status("Выгрузка идёт: кликайте по объектам на карте. Выгруженные объекты "
                          "подсвечиваются.", "ok")
         self._update_buttons()
 
     def stop(self, _checked=False):
+        self._cancel_area_tool()
         tool, self.tool = self.tool, None
         if tool is not None:
             if self.iface.mapCanvas().mapTool() is tool:
@@ -419,7 +450,10 @@ class NspdParserDock(QDockWidget):
         return text
 
     def _on_click_processed(self, added):
-        session = self.session
+        self._report(self.session, added, "Последний клик")
+
+    def _report(self, session, added, what):
+        """Итог клика или области в строке состояния."""
         if session is None:
             return
         if any(error.ssl_failed for error in session.last_errors):
@@ -431,16 +465,92 @@ class NspdParserDock(QDockWidget):
             self._set_status("НСПД не ответил, подробности в журнале.", "error")
             return
         if added:
-            text = "Последний клик: добавлено {0}".format(objects_text(added))
+            text = "{0}: добавлено {1}".format(what, objects_text(added))
             if len(session.last_counts) > 1:
                 text += " ({0})".format("; ".join(
                     "{0}: {1}".format(layer_def.title, count) for layer_def, count in session.last_counts))
             text += "."
         else:
-            text = "Последний клик: новых объектов нет."
+            text = "{0}: новых объектов нет.".format(what)
         if session.last_errors:
             text += " По части слоёв была ошибка, подробности в журнале."
         self._set_status(self._session_summary(text), "ok" if added else "info")
+
+    # === Выгрузка области ===
+
+    def _draw_area(self, _checked=False):
+        self.stop()
+        session = self._prepare_session()
+        if session is None:
+            return
+        canvas = self.iface.mapCanvas()
+        tool = QgsMapToolExtent(canvas)
+        tool.extentChanged.connect(lambda rect, tool=tool, session=session: self._on_area_drawn(tool, session, rect))
+        self.area_tool = tool
+        canvas.setMapTool(tool)
+        self._set_status("Нарисуйте прямоугольник на карте: нажмите кнопку мыши и протяните.", "ok")
+
+    def _on_area_drawn(self, tool, session, rect):
+        if self.area_tool is not tool:
+            return
+        if rect.isEmpty():
+            self._set_status("Прямоугольник получился пустым. Нарисуйте его ещё раз.", "warning")
+            return
+        self._cancel_area_tool()
+        crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+        self._export_area(session, self.core.area_from_rectangle(rect, crs))
+
+    def _cancel_area_tool(self):
+        tool, self.area_tool = self.area_tool, None
+        if tool is not None and self.iface.mapCanvas().mapTool() is tool:
+            self.iface.actionPan().trigger()
+
+    def _export_selection(self, _checked=False):
+        layer = self.iface.activeLayer()
+        area = self.core.area_from_selection(layer) if isinstance(layer, QgsVectorLayer) else None
+        if area is None:
+            self._set_status("Выделите один или несколько полигонов в активном слое и нажмите кнопку "
+                             "ещё раз.", "warning")
+            return
+        self.stop()
+        session = self._prepare_session()
+        if session is not None:
+            self._export_area(session, area)
+
+    def _export_area(self, session, area):
+        qt_enum = self.core.qt_enum
+        size = self.core.area_km2(area)
+        if size > LARGE_AREA_KM2:
+            answer = QMessageBox.question(
+                self, "Большая область",
+                "Площадь области около {0:.1f} км². Выгрузка может занять много времени, "
+                "прервать её можно кнопкой «Отмена». Продолжить?".format(size))
+            if answer != qt_enum(QMessageBox, "StandardButton", "Yes"):
+                self._set_status("Выгрузка области отменена.")
+                return
+        progress = QProgressDialog("Выгрузка области...", "Отмена", 0, 0, self)
+        progress.setWindowTitle("Выгрузка НСПД")
+        progress.setWindowModality(qt_enum(Qt, "WindowModality", "WindowModal"))
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        def on_progress(title, requests, found):
+            progress.setLabelText("«{0}»\nЗапросов: {1}, найдено объектов: {2}".format(title, requests, found))
+
+        self._log("NSPD: выгрузка области около {0:.2f} км².".format(size))
+        try:
+            added = session.export_area(area, progress.wasCanceled, on_progress)
+        finally:
+            canceled = progress.wasCanceled()
+            progress.close()
+            progress.deleteLater()
+        self.session = session
+        self.iface.mapCanvas().refreshAllLayers()
+        self.core.flash_added(self.iface.mapCanvas(), session)
+        if canceled:
+            self._set_status("Выгрузка области отменена, найденное не записано.", "warning")
+        else:
+            self._report(session, added, "Область")
 
     def showEvent(self, event):
         # Сертификаты могли поставить или удалить, пока панель была скрыта.
